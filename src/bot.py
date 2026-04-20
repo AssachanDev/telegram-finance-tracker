@@ -52,6 +52,9 @@ SELECT_TYPE, SELECT_CATEGORY, SELECT_METHOD, ENTER_AMOUNT, ENTER_NOTE, CONFIRM =
 # Conversation states — Category Management
 CAT_TYPE, CAT_ACTION, CAT_ADD_NAME, CAT_REMOVE_SELECT = range(10, 14)
 
+# Conversation states — Edit Transaction
+EDIT_FIELD, EDIT_AMOUNT, EDIT_CAT, EDIT_METHOD, EDIT_NOTE = range(20, 25)
+
 # Callback data
 CB_TYPE = "type"
 CB_CAT = "cat"
@@ -64,6 +67,10 @@ CB_CAT_ACTION = "cataction"
 CB_CAT_REMOVE = "catremove"
 CB_DEL_CONFIRM = "dlconf"
 CB_DEL_CANCEL = "dlcancel"
+CB_EDIT = "edit"
+CB_EFIELD = "efield"
+CB_ECAT = "ecat"
+CB_EMETHOD = "emethod"
 
 TYPE_LABELS = {"expense": "💸 Expense", "income": "💰 Income"}
 METHOD_LABELS = {"cash": "💵 Cash", "transfer": "🏦 Transfer"}
@@ -349,8 +356,16 @@ async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not await _check_auth(update):
         return
     rows = storage.get_recent(10)
+    if not rows:
+        await update.message.reply_text("No recent transactions.")
+        return
     text = formatter.format_recent(rows)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    buttons = [
+        InlineKeyboardButton(f"✏️ {i+1}", callback_data=f"{CB_EDIT}:{row['id']}")
+        for i, row in enumerate(rows)
+    ]
+    keyboard = InlineKeyboardMarkup([buttons[i:i+5] for i in range(0, len(buttons), 5)])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
 async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -538,6 +553,164 @@ async def cat_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # ---------------------------------------------------------------------------
+# Edit Transaction — conversation flow
+# ---------------------------------------------------------------------------
+
+def _edit_field_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💰 Amount",   callback_data=f"{CB_EFIELD}:amount"),
+            InlineKeyboardButton("📂 Category", callback_data=f"{CB_EFIELD}:category"),
+        ],
+        [
+            InlineKeyboardButton("💳 Method",   callback_data=f"{CB_EFIELD}:method"),
+            InlineKeyboardButton("📝 Note",     callback_data=f"{CB_EFIELD}:note"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"{CB_EFIELD}:cancel")],
+    ])
+
+
+async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query: CallbackQuery = update.callback_query
+    await query.answer()
+
+    tx_id = int(query.data.split(":")[1])
+    row = storage.get_transaction(tx_id)
+    if not row:
+        await query.edit_message_text("❌ Transaction not found.")
+        return ConversationHandler.END
+
+    context.user_data["edit_id"] = tx_id
+    context.user_data["edit_row"] = row
+
+    type_label = TYPE_LABELS.get(row["type"], row["type"])
+    method_label = METHOD_LABELS.get(row["method"], row["method"])
+    text = (
+        f"✏️ <b>Edit Transaction</b>\n\n"
+        f"{type_label}  ·  {method_label}\n"
+        f"📂 {row['category']}  ·  {row['amount']:,.0f}\n"
+        f"📅 {row['date']}"
+    )
+    if row.get("note"):
+        text += f"\n📝 <i>{row['note']}</i>"
+    text += "\n\nSelect field to edit:"
+
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_edit_field_keyboard())
+    return EDIT_FIELD
+
+
+async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query: CallbackQuery = update.callback_query
+    await query.answer()
+
+    field = query.data.split(":")[1]
+
+    if field == "cancel":
+        context.user_data.clear()
+        await query.edit_message_text("❌ Cancelled.")
+        return ConversationHandler.END
+
+    context.user_data["edit_field"] = field
+    row = context.user_data["edit_row"]
+
+    if field == "amount":
+        await query.edit_message_text(
+            f"Current amount: <b>{row['amount']:,.0f}</b>\n\nEnter new amount:",
+            parse_mode=ParseMode.HTML,
+        )
+        return EDIT_AMOUNT
+
+    if field == "category":
+        cats = storage.get_categories().get(row["type"], [])
+        rows = [
+            [InlineKeyboardButton(c, callback_data=f"{CB_ECAT}:{c}") for c in cats[i:i+3]]
+            for i in range(0, len(cats), 3)
+        ]
+        await query.edit_message_text(
+            f"Current category: <b>{row['category']}</b>\n\nSelect new category:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return EDIT_CAT
+
+    if field == "method":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(label, callback_data=f"{CB_EMETHOD}:{key}")]
+            for key, label in METHOD_LABELS.items()
+        ])
+        await query.edit_message_text(
+            f"Current method: <b>{METHOD_LABELS.get(row['method'], row['method'])}</b>\n\nSelect new method:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+        return EDIT_METHOD
+
+    if field == "note":
+        await query.edit_message_text(
+            f"Current note: <i>{row.get('note') or '(none)'}</i>\n\nEnter new note (or send — to clear):",
+            parse_mode=ParseMode.HTML,
+        )
+        return EDIT_NOTE
+
+    return ConversationHandler.END
+
+
+async def edit_amount_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip().replace(",", "")
+    try:
+        amount = float(text)
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Invalid amount. Enter a positive number:")
+        return EDIT_AMOUNT
+
+    tx_id = context.user_data["edit_id"]
+    storage.update_transaction(tx_id, "amount", amount)
+    await update.message.reply_text(f"✅ Amount updated to <b>{amount:,.0f}</b>", parse_mode=ParseMode.HTML)
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def edit_cat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query: CallbackQuery = update.callback_query
+    await query.answer()
+
+    category = query.data.split(":", 1)[1]
+    tx_id = context.user_data["edit_id"]
+    storage.update_transaction(tx_id, "category", category)
+    await query.edit_message_text(f"✅ Category updated to <b>{category}</b>", parse_mode=ParseMode.HTML)
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def edit_method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query: CallbackQuery = update.callback_query
+    await query.answer()
+
+    method = query.data.split(":")[1]
+    tx_id = context.user_data["edit_id"]
+    storage.update_transaction(tx_id, "method", method)
+    await query.edit_message_text(
+        f"✅ Method updated to <b>{METHOD_LABELS[method]}</b>", parse_mode=ParseMode.HTML
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def edit_note_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    note = update.message.text.strip()
+    if note == "—":
+        note = ""
+    tx_id = context.user_data["edit_id"]
+    storage.update_transaction(tx_id, "note", note)
+    display = f"<i>{note}</i>" if note else "(cleared)"
+    await update.message.reply_text(f"✅ Note updated: {display}", parse_mode=ParseMode.HTML)
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# ---------------------------------------------------------------------------
 # Scheduled jobs
 # ---------------------------------------------------------------------------
 
@@ -647,10 +820,24 @@ def build_application(token: str, chat_id: str) -> Application:
         ],
     )
 
+    # Edit Transaction conversation
+    edit_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_start, pattern=f"^{CB_EDIT}:\\d+$")],
+        states={
+            EDIT_FIELD:  [CallbackQueryHandler(edit_field_callback,  pattern=f"^{CB_EFIELD}:")],
+            EDIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_amount_handler)],
+            EDIT_CAT:    [CallbackQueryHandler(edit_cat_callback,    pattern=f"^{CB_ECAT}:")],
+            EDIT_METHOD: [CallbackQueryHandler(edit_method_callback, pattern=f"^{CB_EMETHOD}:")],
+            EDIT_NOTE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_note_handler)],
+        },
+        fallbacks=nav_fallbacks,
+    )
+
     # Register handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(add_conv)
     app.add_handler(cat_conv)
+    app.add_handler(edit_conv)
 
     app.add_handler(CommandHandler("summary", summary_command))
     app.add_handler(MessageHandler(filters.Regex(r"^📊 Summary$"), summary_command))

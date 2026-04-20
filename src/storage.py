@@ -127,6 +127,23 @@ def append_transaction(tx_type: str, category: str, amount: float, method: str, 
         )
 
 
+def get_transaction(tx_id: int) -> dict | None:
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM transactions WHERE id = ?", (tx_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_transaction(tx_id: int, field: str, value) -> bool:
+    allowed = {"category", "amount", "method", "note"}
+    if field not in allowed:
+        return False
+    with _conn() as conn:
+        cur = conn.execute(
+            f"UPDATE transactions SET {field} = ? WHERE id = ?", (value, tx_id)
+        )
+    return cur.rowcount > 0
+
+
 def delete_last_transaction() -> dict | None:
     with _conn() as conn:
         row = conn.execute("SELECT * FROM transactions ORDER BY id DESC LIMIT 1").fetchone()
