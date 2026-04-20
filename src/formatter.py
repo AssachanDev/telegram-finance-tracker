@@ -77,12 +77,18 @@ def format_recent(rows: list[dict]) -> str:
         return "No transactions recorded yet."
 
     lines = ["🕐 <b>Recent Transactions</b>", ""]
-    for row in rows:
+    for i, row in enumerate(rows, 1):
         sign      = "−" if row["type"] == "expense" else "+"
         type_icon = "💸" if row["type"] == "expense" else "💰"
         method    = "💵" if row.get("method") == "cash" else "🏦"
-        note      = f"\n      <i>{row['note']}</i>" if row.get("note") else ""
-        lines.append(f"{type_icon} {row['category']:<14} {method}  {sign} {_fmt(row['amount'])}{note}")
+        try:
+            date_str = datetime.strptime(row["date"], "%Y-%m-%d").strftime("%b %-d")
+        except ValueError:
+            date_str = row["date"]
+        amount_str = f"{sign}{CURRENCY}{row['amount']:,.0f}"
+        lines.append(f"<code>{i:>2}</code>  {date_str}  {type_icon} {row['category']:<12}  {method}  {amount_str}")
+        if row.get("note"):
+            lines.append(f"          <i>{row['note']}</i>")
     return "\n".join(lines)
 
 

@@ -37,6 +37,7 @@ cp .env.example .env   # fill in your values
 - **Expense & Income** tracking with category selection
 - **Cash / Transfer** split — separate running balance per method
 - **Auto-cancel** — pressing any menu button mid-flow cancels the current action and processes the new one
+- **Edit Transaction** — edit amount, category, method, or note on any of the 10 most recent transactions
 - **Delete Last** — remove the most recent transaction with confirmation
 - **Custom categories** — add/remove per type from within the bot
 - **Automatic reports** — daily at 23:30, monthly on last day, yearly on Dec 31 (Bangkok time)
